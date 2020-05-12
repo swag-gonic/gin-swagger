@@ -2,7 +2,9 @@ package ginSwagger
 
 import (
 	"html/template"
+	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -15,14 +17,24 @@ import (
 // Config stores ginSwagger configuration variables.
 type Config struct {
 	//The url pointing to API definition (normally swagger.json or swagger.yaml). Default is `doc.json`.
-	URL         string
-	DeepLinking bool
+	SpecFileName   string
+	SwaggerBase    string
+	DeepLinking    bool
+	Oauth2ClientID string
+	Oauth2AppName  string
 }
 
-// URL presents the url pointing to API definition (normally swagger.json or swagger.yaml).
-func URL(url string) func(c *Config) {
+// SwaggerBase sets the subpath of swagger router. Default is `swagger/`.
+func SwaggerBase(swaggerBase string) func(c *Config) {
 	return func(c *Config) {
-		c.URL = url
+		c.SwaggerBase = swaggerBase
+	}
+}
+
+// SpecFileName sets name of API definition (normally swagger.json or swagger.yaml).
+func SpecFileName(specFileName string) func(c *Config) {
+	return func(c *Config) {
+		c.SpecFileName = specFileName
 	}
 }
 
@@ -33,11 +45,28 @@ func DeepLinking(deepLinking bool) func(c *Config) {
 	}
 }
 
+// Oauth2ClientID sets OAuth2 client ID
+func Oauth2ClientID(clientID string) func(c *Config) {
+	return func(c *Config) {
+		c.Oauth2ClientID = clientID
+	}
+}
+
+// Oauth2AppName sets OAuth2 application name
+func Oauth2AppName(appName string) func(c *Config) {
+	return func(c *Config) {
+		c.Oauth2AppName = appName
+	}
+}
+
 // WrapHandler wraps `http.Handler` into `gin.HandlerFunc`.
 func WrapHandler(h *webdav.Handler, confs ...func(c *Config)) gin.HandlerFunc {
 	defaultConfig := &Config{
-		URL:         "doc.json",
-		DeepLinking: true,
+		SpecFileName:   "doc.json",
+		SwaggerBase:    "/swagger/",
+		DeepLinking:    true,
+		Oauth2ClientID: "your-client-id",
+		Oauth2AppName:  "your-app-name",
 	}
 
 	for _, c := range confs {
@@ -52,25 +81,46 @@ func CustomWrapHandler(config *Config, h *webdav.Handler) gin.HandlerFunc {
 	//create a template with name
 	t := template.New("swagger_index.html")
 	index, _ := t.Parse(swagger_index_templ)
+	specFileName := config.SpecFileName
 
-	var rexp = regexp.MustCompile(`(.*)(index\.html|doc\.json|favicon-16x16\.png|favicon-32x32\.png|/oauth2-redirect\.html|swagger-ui\.css|swagger-ui\.css\.map|swagger-ui\.js|swagger-ui\.js\.map|swagger-ui-bundle\.js|swagger-ui-bundle\.js\.map|swagger-ui-standalone-preset\.js|swagger-ui-standalone-preset\.js\.map)[\?|.]*`)
+	if specFileName == "" {
+		specFileName = "doc.json"
+	}
+
+	specRegexStr := strings.Replace(specFileName, ".", "\\.", -1)
+	var rexp = regexp.MustCompile(`(.*)(` + specRegexStr + `|favicon-16x16\.png|favicon-32x32\.png|/oauth2-redirect\.html|swagger-ui\.css|swagger-ui\.css\.map|swagger-ui\.js|swagger-ui\.js\.map|swagger-ui-bundle\.js|swagger-ui-bundle\.js\.map|swagger-ui-standalone-preset\.js|swagger-ui-standalone-preset\.js\.map)[\?|.]*`)
 
 	return func(c *gin.Context) {
 
 		type swaggerUIBundle struct {
-			URL         string
-			DeepLinking bool
+			URL               string
+			DeepLinking       bool
+			Oauth2RedirectURL template.JS
+			Oauth2ClientID    string
+			Oauth2AppName     string
+		}
+
+		if c.Request.RequestURI == config.SwaggerBase {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			index.Execute(c.Writer, &swaggerUIBundle{
+				URL:               filepath.Join(config.SwaggerBase, specFileName),
+				DeepLinking:       config.DeepLinking,
+				Oauth2RedirectURL: template.JS("`${window.location.protocol}//${window.location.host}" + filepath.Join(config.SwaggerBase, "oauth2-redirect.html") + "`"),
+				Oauth2ClientID:    config.Oauth2ClientID,
+				Oauth2AppName:     config.Oauth2AppName,
+			})
+			return
 		}
 
 		var matches []string
 		if matches = rexp.FindStringSubmatch(c.Request.RequestURI); len(matches) != 3 {
-			c.Status(404)
+			c.Status(http.StatusNotFound)
 			c.Writer.Write([]byte("404 page not found"))
 			return
 		}
+
+		h.Prefix = matches[1]
 		path := matches[2]
-		prefix := matches[1]
-		h.Prefix = prefix
 
 		if strings.HasSuffix(path, ".html") {
 			c.Header("Content-Type", "text/html; charset=utf-8")
@@ -82,38 +132,32 @@ func CustomWrapHandler(config *Config, h *webdav.Handler) gin.HandlerFunc {
 			c.Header("Content-Type", "application/json")
 		}
 
-		switch path {
-		case "index.html":
-			index.Execute(c.Writer, &swaggerUIBundle{
-				URL:         config.URL,
-				DeepLinking: config.DeepLinking,
-			})
-		case "doc.json":
+		if path == specFileName {
 			doc, err := swag.ReadDoc()
 			if err != nil {
 				panic(err)
 			}
 			c.Writer.Write([]byte(doc))
 			return
-		default:
-			h.ServeHTTP(c.Writer, c.Request)
 		}
+
+		h.ServeHTTP(c.Writer, c.Request)
 	}
 }
 
 // DisablingWrapHandler turn handler off
 // if specified environment variable passed
-func DisablingWrapHandler(h *webdav.Handler, envName string) gin.HandlerFunc {
+func DisablingWrapHandler(h *webdav.Handler, envName string, confs ...func(c *Config)) gin.HandlerFunc {
 	eFlag := os.Getenv(envName)
 	if eFlag != "" {
 		return func(c *gin.Context) {
 			// Simulate behavior when route unspecified and
 			// return 404 HTTP code
-			c.String(404, "")
+			c.String(http.StatusNotFound, "")
 		}
 	}
 
-	return WrapHandler(h)
+	return WrapHandler(h, confs...)
 }
 
 // DisablingCustomWrapHandler turn handler off
@@ -124,7 +168,7 @@ func DisablingCustomWrapHandler(config *Config, h *webdav.Handler, envName strin
 		return func(c *gin.Context) {
 			// Simulate behavior when route unspecified and
 			// return 404 HTTP code
-			c.String(404, "")
+			c.String(http.StatusNotFound, "")
 		}
 	}
 
@@ -209,6 +253,7 @@ window.onload = function() {
     url: "{{.URL}}",
     dom_id: '#swagger-ui',
     validatorUrl: null,
+    oauth2RedirectUrl: {{.Oauth2RedirectURL}},
     presets: [
       SwaggerUIBundle.presets.apis,
       SwaggerUIStandalonePreset
@@ -216,8 +261,14 @@ window.onload = function() {
     plugins: [
       SwaggerUIBundle.plugins.DownloadUrl
     ],
-	layout: "StandaloneLayout",
-	deepLinking: {{.DeepLinking}}
+    layout: "StandaloneLayout",
+    deepLinking: {{.DeepLinking}},
+    showExtensions: true	
+  })
+
+  ui.initOAuth({
+    clientId: "{{.Oauth2ClientID}}",
+    appName: "{{.Oauth2AppName}}"
   })
 
   window.ui = ui

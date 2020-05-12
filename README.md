@@ -60,18 +60,22 @@ import (
 // @license.url http://www.apache.org/licenses/LICENSE-2.0.html
 
 // @host petstore.swagger.io
-// @BasePath /v2
+// @BasePath /api/v2
 func main() {
 	r := gin.New()
 
-	url := ginSwagger.URL("http://localhost:8080/swagger/doc.json") // The url pointing to API definition
-	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, url))
+	swaggerBase := ginSwagger.SwaggerBase("/api/v2/docs/") // default `swagger/`
+	specFileName := ginSwagger.SpecFileName("swagger.json") // default `doc.json`
+
+	apiGroup := r.Group("/api/v2")
+	// apiGroup.GET("/ping", api.GetPing)
+	apiGroup.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, swaggerBase, specFileName))
 
 	r.Run()
 }
 ```
 
-5. Run it, and browser to http://localhost:8080/swagger/index.html, you can see Swagger 2.0 Api documents.
+5. Run it, and browse to http://localhost:8080/api/v2/docs/, you can see Swagger 2.0 Api documents.
 
 ![swagger_index.html](https://user-images.githubusercontent.com/8943871/60704329-b7ab0680-9f36-11e9-9184-5c638c05e9c5.png)
 
